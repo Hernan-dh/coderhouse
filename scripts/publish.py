@@ -16,8 +16,15 @@ ROOT = Path(__file__).resolve().parents[1]
 TITLE_PATTERN = re.compile(
     r"^(feat|fix|docs|style|refactor|perf|test|build|ci|chore)(\([^)]+\))?!?: .+"
 )
-DEFAULT_GEMINI_MODELS = ("gemini-3.5-flash", "gemini-3.7-flash", "gemini-3.5-flash-lite")
+DEFAULT_GEMINI_MODELS = (
+    "gemini-3.5-flash",
+    "gemini-3.7-flash",
+    "gemini-3.5-flash-lite",
+    "gemini-3.1-flash-lite",
+)
 DEFAULT_GROQ_MODEL = "openai/gpt-oss-120b"
+DEFAULT_OPENROUTER_MODEL = "nvidia/nemotron-3.5-lightning:free"
+DEFAULT_REQUEST_TIMEOUT = 15
 MAX_CONTEXT = 24_000
 
 
@@ -163,10 +170,26 @@ def with_groq(context: str, model: str, key: str, base_url: str, timeout: int) -
     return parse(response["choices"][0]["message"]["content"])
 
 
+def with_openrouter(context: str, model: str, key: str, base_url: str, timeout: int) -> tuple[str, str]:
+    payload = {
+        "model": model,
+        "messages": [{"role": "user", "content": context}],
+        "temperature": 0.4,
+        "max_tokens": 1_000,
+    }
+    response = post(
+        f"{base_url.rstrip('/')}/chat/completions",
+        {"Content-Type": "application/json", "Authorization": f"Bearer {key}"},
+        payload,
+        timeout,
+    )
+    return parse(response["choices"][0]["message"]["content"])
+
+
 def generate(paths: list[str]) -> tuple[str, str]:
     load_environment()
     context = prompt(paths)
-    timeout = int(os.getenv("COMMIT_GENERATION_TIMEOUT", "15"))
+    timeout = int(os.getenv("COMMIT_GENERATION_TIMEOUT", str(DEFAULT_REQUEST_TIMEOUT)))
     attempts = []
     gemini_key = os.getenv("GEMINI_API_KEY", "").strip()
     models = tuple(
@@ -179,11 +202,30 @@ def generate(paths: list[str]) -> tuple[str, str]:
             (f"Gemini/{model}", lambda model=model: with_gemini(context, model, gemini_key, timeout))
             for model in models
         )
+    openrouter_key = os.getenv("OPENROUTER_API_KEY", "").strip()
+    if openrouter_key:
+        model = os.getenv("OPENROUTER_COMMIT_MODEL", os.getenv("OPENROUTER_MODEL", DEFAULT_OPENROUTER_MODEL)).strip()
+        base_url = os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1").strip()
+        attempts.append(
+            (
+                f"OpenRouter/{model}",
+                lambda model=model, base_url=base_url: with_openrouter(
+                    context, model, openrouter_key, base_url, timeout
+                ),
+            )
+        )
     groq_key = os.getenv("GROQ_API_KEY", "").strip()
     if groq_key:
         model = os.getenv("GROQ_COMMIT_MODEL", DEFAULT_GROQ_MODEL).strip()
         base_url = os.getenv("GROQ_BASE_URL", "https://api.groq.com/openai/v1").strip()
-        attempts.append((f"Groq/{model}", lambda: with_groq(context, model, groq_key, base_url, timeout)))
+        attempts.append(
+            (
+                f"Groq/{model}",
+                lambda model=model, base_url=base_url: with_groq(
+                    context, model, groq_key, base_url, timeout
+                ),
+            )
+        )
     if not attempts:
         raise SystemExit(
             "Configurá GEMINI_API_KEY o GROQ_API_KEY, o indicá --title y --description."
